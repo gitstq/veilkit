@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VeilKit · 零宽字符隐写演练场（离线可用）</title>
+<style>
+  :root { --bg:#0f1220; --panel:#181c2f; --line:#2a3050; --txt:#e8ebff; --muted:#9aa3c7;
+          --accent:#6ea8fe; --ok:#3ddc97; --warn:#ffd166; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:linear-gradient(160deg,#0f1220,#141a33); color:var(--txt); padding:32px 16px; }
+  .wrap { max-width:920px; margin:0 auto; }
+  h1 { font-size:24px; margin:0 0 6px; }
+  .sub { color:var(--muted); margin-bottom:24px; font-size:14px; line-height:1.7; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:18px; }
+  label { display:block; font-size:13px; color:var(--muted); margin-bottom:8px; }
+  textarea, input[type=text] { width:100%; background:#0e1226; border:1px solid var(--line); border-radius:10px;
+          color:var(--txt); padding:12px; font-size:14px; font-family:inherit; resize:vertical; }
+  textarea { min-height:96px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+  button { background:var(--accent); color:#0b1030; border:0; border-radius:10px; padding:10px 18px;
+           font-size:14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  .stat { margin-top:12px; font-size:13px; color:var(--ok); white-space:pre-wrap; word-break:break-all; }
+  .stat.err { color:#ff7b8a; }
+  .hint { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.7; }
+  code { background:#0e1226; padding:2px 6px; border-radius:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🫥 VeilKit 零宽字符隐写演练场</h1>
+  <div class="sub">
+    纯前端、单文件、完全离线运行，刷新/断网均可用。本页与 <code>veilkit text-hide</code>
+    的<strong>明文帧格式互通</strong>：本页生成的文本可用 Python CLI 直接提取（反之亦然）。
+    零宽字符在绝大多数聊天框、文档、代码注释中不可见，但会随文本一起被复制传播。
+  </div>
+
+  <div class="card">
+    <label for="cover">① 封面文本（所有人可见的内容）</label>
+    <textarea id="cover" placeholder="例如：今晚会议照常举行，记得带笔记本。">今晚会议照常举行，记得带笔记本。</textarea>
+    <label for="secret" style="margin-top:14px;">② 隐写内容（仅接收方知道如何提取）</label>
+    <input type="text" id="secret" placeholder="例如：真正的集合地点是 B 座 12 层" value="真正的集合地点是 B 座 12 层">
+    <div class="row">
+      <button onclick="doHide()">🕳️ 写入隐写</button>
+      <button class="ghost" onclick="copyOut()">复制结果</button>
+    </div>
+    <div class="hint">插入位置默认在文末；隐写后封面文本看起来没有任何变化。</div>
+  </div>
+
+  <div class="card">
+    <label for="stego">③ 粘贴待提取 / 待清理的文本</label>
+    <textarea id="stego" placeholder="把含有零宽字符的文本粘贴到这里"></textarea>
+    <div class="row">
+      <button onclick="doExtract()">🔍 提取隐写</button>
+      <button class="ghost" onclick="doStrip()">🧹 清除隐写符号</button>
+    </div>
+    <div id="stat" class="stat"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// 与 Python 端 veilkit/carriers/text.py、crypto.py 明文帧保持一致
+const ZERO = "\u200B", ONE = "\u200C", SEP = "\u200D", MARK = "\u2060";
+const MAGIC = [0x56, 0x45, 0x49, 0x4c, 0x4b, 0x49, 0x54, 0x31]; // "VEILKIT1"
+
+function buildFrame(text) {
+  const payload = Array.from(new TextEncoder().encode(text));
+  const len = payload.length;
+  return MAGIC.concat([0, (len >>> 24) & 255, (len >>> 16) & 255,
+                       (len >>> 8) & 255, len & 255], payload);
+}
+function encodeBlock(bytes) {
+  let out = MARK;
+  for (const b of bytes) {
+    for (let sh = 7; sh >= 0; sh--) out += (((b >> sh) & 1) ? ONE : ZERO);
+    out += SEP;
+  }
+  return out + MARK;
+}
+function decodeBlock(text) {
+  let inner = text;
+  const first = text.indexOf(MARK);
+  if (first !== -1) {
+    const second = text.indexOf(MARK, first + 1);
+    if (second !== -1) inner = text.slice(first + 1, second);
+  }
+  const bytes = [];
+  let cur = 0, bits = 0, found = false;
+  for (const ch of inner) {
+    if (ch === ZERO) { cur = (cur << 1); bits++; found = true; }
+    else if (ch === ONE) { cur = (cur << 1) | 1; bits++; found = true; }
+    else if (ch === SEP) { if (bits > 0) { bytes.push(cur); cur = 0; bits = 0; } }
+    if (bits === 8) { bytes.push(cur); cur = 0; bits = 0; }
+  }
+  if (!found) throw new Error("未检测到零宽字符");
+  return Uint8Array.from(bytes);
+}
+function parseFrame(bytes) {
+  if (bytes.length < 13 || !MAGIC.every((v, i) => bytes[i] === v))
+    throw new Error("不是 VeilKit 帧（可能未加密模式不匹配，加密内容请使用 Python CLI 提取）");
+  const flag = bytes[8];
+  const len = (bytes[9] << 24 | bytes[10] << 16 | bytes[11] << 8 | bytes[12]) >>> 0;
+  if (flag !== 0) throw new Error("该内容经过口令加密，请使用 veilkit CLI 提取");
+  return new TextDecoder().decode(bytes.slice(13, 13 + len));
+}
+function setStat(msg, isErr) {
+  const el = document.getElementById("stat");
+  el.textContent = msg; el.className = "stat" + (isErr ? " err" : "");
+}
+function doHide() {
+  const cover = document.getElementById("cover").value;
+  const secret = document.getElementById("secret").value;
+  const block = encodeBlock(buildFrame(secret));
+  document.getElementById("stego").value = cover + block;
+  setStat("✅ 已写入 " + new TextEncoder().encode(secret).length +
+          " 字节负载，结果已填入下方文本框，肉眼无法看出变化。");
+}
+async function copyOut() {
+  const v = document.getElementById("stego").value;
+  await navigator.clipboard.writeText(v);
+  setStat("📋 已复制到剪贴板");
+}
+function doExtract() {
+  try {
+    const frame = decodeBlock(document.getElementById("stego").value);
+    setStat("🔓 提取结果：" + parseFrame(frame));
+  } catch (e) { setStat("❌ " + e.message, true); }
+}
+function doStrip() {
+  const el = document.getElementById("stego");
+  el.value = Array.from(el.value).filter(c => ![ZERO, ONE, SEP, MARK].includes(c)).join("");
+  setStat("🧹 已清除全部零宽隐写符号");
+}
+</script>
+</body>
+</html>
